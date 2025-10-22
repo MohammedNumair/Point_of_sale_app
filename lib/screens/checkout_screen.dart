@@ -1,4 +1,6 @@
 // lib/screens/checkout_screen.dart
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:pdf/pdf.dart';
@@ -6,6 +8,7 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import 'package:intl/intl.dart';
 import 'package:dio/dio.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../providers/cart_model.dart';
 import '../api/api_client.dart';
@@ -56,6 +59,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       final apiProv = Provider.of<ApiProvider>(context, listen: false);
       final dio = apiProv.dio;
 
+      // fetch lists using ApiProvider helpers where available
       final customers = await apiProv.getCustomerList();
       final posProfiles = await apiProv.getPOSProfileList();
       final priceLists = await apiProv.getSellingPriceList();
@@ -67,23 +71,41 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
       List<Map<String, dynamic>> paymentModes = <Map<String, dynamic>>[];
       if (resp.statusCode == 200 && resp.data is Map && resp.data['data'] is List) {
-        paymentModes = List<Map<String, dynamic>>.from(
-            (resp.data['data'] as List).map((e) => Map<String, dynamic>.from(e)));
+        paymentModes = List<Map<String, dynamic>>.from((resp.data['data'] as List).map((e) => Map<String, dynamic>.from(e)));
+      }
+
+      // read saved selections (from ItemListScreen settings) if present
+      final prefs = await SharedPreferences.getInstance();
+      final savedPos = prefs.getString('selected_pos_profile')?.trim();
+      final savedPrice = prefs.getString('selected_price_list')?.trim();
+      final savedCompany = prefs.getString('company_name')?.trim();
+      final savedCustomer = prefs.getString('selected_customer')?.trim(); // optional (ItemListScreen didn't persist by default)
+
+      // determine default currency - prefer INR if available
+      String? defaultCurrency;
+      if (currencies.isNotEmpty) {
+        final foundInr = currencies.firstWhere((c) => (c['name'] ?? '').toString().toUpperCase() == 'INR', orElse: () => {});
+        if (foundInr.isNotEmpty) defaultCurrency = foundInr['name']?.toString();
       }
 
       setState(() {
         _customers = customers;
         _posProfiles = posProfiles;
-        _price_listsSetter(priceLists);
         _priceLists = priceLists;
         _currencies = currencies;
         _paymentModes = paymentModes;
 
-        if (_customers.isNotEmpty) _selectedCustomer = _customers.first['name'] ?? _customers.first['customer_name']?.toString();
-        if (_posProfiles.isNotEmpty) _selectedPosProfile = _posProfiles.first['name'];
-        if (_priceLists.isNotEmpty) _selectedPriceList = _priceLists.first['name'];
-        if (_currencies.isNotEmpty) _selectedCurrency = _currencies.first['name'];
-        if (_paymentModes.isNotEmpty) _selectedPaymentMode = _paymentModes.first['name'];
+        // prefer saved values, else pick first available
+        _selectedPosProfile = savedPos?.isNotEmpty == true ? savedPos : (_posProfiles.isNotEmpty ? _posProfiles.first['name']?.toString() : null);
+        _selectedPriceList = savedPrice?.isNotEmpty == true ? savedPrice : (_priceLists.isNotEmpty ? _priceLists.first['name']?.toString() : null);
+        _selectedCurrency = defaultCurrency ?? (_currencies.isNotEmpty ? _currencies.first['name']?.toString() : null);
+        _selectedPaymentMode = _paymentModes.isNotEmpty ? _paymentModes.first['name']?.toString() : null;
+
+        // prefer saved customer if present, else default to first from server
+        _selectedCustomer = savedCustomer?.isNotEmpty == true ? savedCustomer : (_customers.isNotEmpty ? (_customers.first['name'] ?? _customers.first['customer_name'])?.toString() : null);
+
+        // prefer saved company
+        if (savedCompany != null && savedCompany.isNotEmpty) AppConfig.companyName = savedCompany;
       });
     } on DioError catch (dioErr) {
       String msg = 'Error loading dropdowns: ${dioErr.message}';
@@ -98,61 +120,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     }
   }
 
-  // helper to avoid analyzer warnings in pasted code
-  void _price_listsSetter(List<Map<String, dynamic>> v) {}
-
   String formatQty(double q) {
     if (q % 1 == 0) return q.toStringAsFixed(0);
     if ((q * 10) % 1 == 0) return q.toStringAsFixed(1);
     if ((q * 100) % 1 == 0) return q.toStringAsFixed(2);
     return q.toStringAsFixed(3).replaceAll(RegExp(r'0+$'), '').replaceAll(RegExp(r'\.$'), '');
-  }
-
-  Future<void> _printInvoice(BuildContext context, CartModel cart) async {
-    final pdf = pw.Document();
-
-    pdf.addPage(
-      pw.Page(
-        pageFormat: PdfPageFormat(58 * PdfPageFormat.mm, double.infinity),
-        margin: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 6),
-        build: (pw.Context ctx) {
-          String formatLine(String name, double qty, double total) {
-            final cleanName = name.length > 18 ? name.substring(0, 18) : name;
-            final qtyText = formatQty(qty);
-            final itemText = '$cleanName x$qtyText';
-            return itemText.padRight(22) + total.toStringAsFixed(2);
-          }
-
-          return pw.Column(
-            crossAxisAlignment: pw.CrossAxisAlignment.start,
-            children: [
-              pw.Center(child: pw.Text('POS Invoice', style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold))),
-              pw.SizedBox(height: 6),
-              pw.Divider(thickness: 0.5),
-              ...cart.items.map((c) => pw.Padding(
-                padding: const pw.EdgeInsets.symmetric(vertical: 2),
-                child: pw.Text(formatLine(c.item.itemName ?? c.item.name, c.qty, c.rate * c.qty),
-                    style: const pw.TextStyle(fontSize: 9)),
-              )),
-              pw.Divider(thickness: 0.5),
-              pw.SizedBox(height: 4),
-              pw.Text('TOTAL:'.padRight(22) + cart.total.toStringAsFixed(2),
-                  style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold)),
-              pw.SizedBox(height: 10),
-              pw.Center(child: pw.Text('Thank you!', style: pw.TextStyle(fontSize: 9))),
-            ],
-          );
-        },
-      ),
-    );
-
-    try {
-      await Printing.layoutPdf(onLayout: (PdfPageFormat fmt) async => pdf.save());
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Print job requested')));
-    } catch (e, st) {
-      debugPrint('>>> printInvoice error: $e\n$st');
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Print error: $e')));
-    }
   }
 
   /// Create POS invoice on server. Returns a result map:
@@ -164,9 +136,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       return {'ok': false, 'message': 'Company not configured'};
     }
 
+    // ensure required fields are set (we default using lookups + SharedPreferences)
     if (_selectedCustomer == null || _selectedPosProfile == null || _selectedPriceList == null || _selectedCurrency == null || _selectedPaymentMode == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please fill all dropdowns')));
-      return {'ok': false, 'message': 'Please fill all dropdowns'};
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Missing required fields.')));
+      return {'ok': false, 'message': 'Missing required fields'};
     }
 
     final apiProv = Provider.of<ApiProvider>(context, listen: false);
@@ -194,7 +167,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         {'mode_of_payment': _selectedPaymentMode, 'amount': cart.total}
       ],
       'paid_amount': cart.total,
-      'docstatus': 1,
+      'docstatus': 1, // create as submitted
     };
 
     debugPrint('>>> createPosInvoice payload: $payload');
@@ -251,148 +224,6 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     } finally {
       if (mounted) setState(() => _creatingInvoice = false);
     }
-  }
-
-  Future<void> _showCreateDialog(BuildContext screenContext, CartModel cart) async {
-    // use the screenContext (outer context) for navigation so we don't try to navigate from inside the dialog
-    showDialog(
-      context: screenContext,
-      builder: (_) {
-        return StatefulBuilder(builder: (ctx, setStateDialog) {
-          return AlertDialog(
-            title: const Text('Create POS Invoice'),
-            content: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (_loadingLookups) const LinearProgressIndicator(),
-                  if (_lookupError != null) Padding(padding: const EdgeInsets.symmetric(vertical: 8.0), child: Text(_lookupError!, style: const TextStyle(color: Colors.red))),
-                  // Customer
-                  GestureDetector(
-                    onTap: () async {
-                      final sel = await _openSearchablePicker(ctx: screenContext, title: 'Select Customer', items: _customers, valueKey: 'name', subLabelKey: 'customer_name');
-                      if (sel != null) setStateDialog(() => _selectedCustomer = sel);
-                    },
-                    child: InputDecorator(
-                      decoration: const InputDecoration(labelText: 'Customer', border: OutlineInputBorder()),
-                      child: Row(children: [Expanded(child: Text(_selectedCustomer ?? 'Select')), const Icon(Icons.arrow_drop_down)]),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  // POS Profile
-                  InputDecorator(
-                    decoration: const InputDecoration(labelText: 'POS Profile', border: OutlineInputBorder()),
-                    child: DropdownButtonHideUnderline(
-                      child: DropdownButton<String>(
-                        isExpanded: true,
-                        value: _selectedPosProfile,
-                        items: _posProfiles.map((m) {
-                          final display = m['name'] ?? m.toString();
-                          return DropdownMenuItem<String>(value: m['name']?.toString(), child: Text(display.toString()));
-                        }).toList(),
-                        onChanged: (v) => setStateDialog(() => _selectedPosProfile = v),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  // Price List
-                  InputDecorator(
-                    decoration: const InputDecoration(labelText: 'Selling Price List', border: OutlineInputBorder()),
-                    child: DropdownButtonHideUnderline(
-                      child: DropdownButton<String>(
-                        isExpanded: true,
-                        value: _selectedPriceList,
-                        items: _priceLists.map((m) {
-                          return DropdownMenuItem<String>(value: m['name']?.toString(), child: Text(m['name']?.toString() ?? ''));
-                        }).toList(),
-                        onChanged: (v) => setStateDialog(() => _selectedPriceList = v),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  // Currency
-                  GestureDetector(
-                    onTap: () async {
-                      final sel = await _openSearchablePicker(ctx: screenContext, title: 'Select Currency', items: _currencies, valueKey: 'name');
-                      if (sel != null) setStateDialog(() => _selectedCurrency = sel);
-                    },
-                    child: InputDecorator(decoration: const InputDecoration(labelText: 'Currency', border: OutlineInputBorder()), child: Row(children: [Expanded(child: Text(_selectedCurrency ?? 'Select')), const Icon(Icons.arrow_drop_down)])),
-                  ),
-                  const SizedBox(height: 8),
-                  // Payment Mode
-                  InputDecorator(
-                    decoration: const InputDecoration(labelText: 'Mode of Payment', border: OutlineInputBorder()),
-                    child: DropdownButtonHideUnderline(
-                      child: DropdownButton<String>(
-                        isExpanded: true,
-                        value: _selectedPaymentMode,
-                        items: _paymentModes.map((m) {
-                          final label = (m['mode_of_payment'] ?? m['name'])?.toString() ?? '';
-                          return DropdownMenuItem<String>(value: m['name']?.toString(), child: Text(label));
-                        }).toList(),
-                        onChanged: (v) => setStateDialog(() => _selectedPaymentMode = v),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  InputDecorator(
-                    decoration: const InputDecoration(labelText: 'Posting Date', border: OutlineInputBorder()),
-                    child: Row(
-                      children: [
-                        Expanded(child: Text(DateFormat('yyyy-MM-dd').format(_postingDate))),
-                        TextButton(onPressed: () async {
-                          final d = await showDatePicker(context: screenContext, initialDate: _postingDate, firstDate: DateTime(2000), lastDate: DateTime(2100));
-                          if (d != null) setStateDialog(() => _postingDate = d);
-                        }, child: const Text('Select')),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(onPressed: () => Navigator.of(screenContext).pop(), child: const Text('Cancel')),
-              TextButton(
-                onPressed: _creatingInvoice ? null : () async {
-                  if (_selectedCustomer == null || _selectedPosProfile == null || _selectedPriceList == null || _selectedCurrency == null || _selectedPaymentMode == null) {
-                    ScaffoldMessenger.of(screenContext).showSnackBar(const SnackBar(content: Text('Please fill all dropdowns')));
-                    return;
-                  }
-
-                  // Call the create function using the screenContext and the cart from provider (screen-level)
-                  final result = await _createInvoiceOnServer(screenContext, Provider.of<CartModel>(screenContext, listen: false));
-
-                  // Always close the dialog first
-                  Navigator.of(screenContext).pop();
-
-                  // Show feedback
-                  if (result['ok'] == true) {
-                    final invoiceName = result['invoiceName'] as String?;
-                    final msg = result['message']?.toString() ?? 'Invoice created';
-                    ScaffoldMessenger.of(screenContext).showSnackBar(SnackBar(content: Text(msg)));
-
-                    // Navigate to invoice result screen (replace current screen)
-                    // Use pushReplacement so checkout screen is replaced by result, similar to your desired flow
-                    Navigator.of(context).pushReplacement(MaterialPageRoute(
-                      builder: (_) => InvoiceResultScreen(
-                        invoiceName: _createdInvoiceName ?? '',
-                        cartSnapshot: List.from(cart.items), // snapshot copy
-                        customerName: _selectedCustomer,      // pass selected customer from checkout screen
-                      ),
-                    ));
-
-                  } else {
-                    final err = result['message']?.toString() ?? 'Failed to create invoice';
-                    ScaffoldMessenger.of(screenContext).showSnackBar(SnackBar(content: Text(err)));
-                  }
-                },
-                child: _creatingInvoice ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('Submit'),
-              ),
-            ],
-          );
-        });
-      },
-    );
   }
 
   Future<String?> _openSearchablePicker({
@@ -456,6 +287,55 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     );
   }
 
+  Future<void> _completeOrder(CartModel cart) async {
+    // ensure lookups are loaded
+    if (_loadingLookups) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please wait — loading settings...')));
+      return;
+    }
+
+    // attempt to prefer values from SharedPreferences (they come from ItemListScreen)
+    final prefs = await SharedPreferences.getInstance();
+    final savedPos = prefs.getString('selected_pos_profile')?.trim();
+    final savedPrice = prefs.getString('selected_price_list')?.trim();
+    final savedCustomer = prefs.getString('selected_customer')?.trim();
+
+    if (savedPos != null && savedPos.isNotEmpty) _selectedPosProfile = savedPos;
+    if (savedPrice != null && savedPrice.isNotEmpty) _selectedPriceList = savedPrice;
+    if (savedCustomer != null && savedCustomer.isNotEmpty) _selectedCustomer = savedCustomer;
+
+    // Basic validation
+    if (_selectedCustomer == null || _selectedPosProfile == null || _selectedPriceList == null || _selectedCurrency == null || _selectedPaymentMode == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Missing required fields. Please check Mode of Payment, Currency and that POS/PriceList/Customer are configured.')));
+      return;
+    }
+
+    final result = await _createInvoiceOnServer(context, cart);
+
+    if (result['ok'] == true) {
+      final invoiceName = result['invoiceName'] as String?;
+      final msg = result['message']?.toString() ?? 'Invoice created';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+
+      // optionally print
+      // try {
+      //   await _printInvoice(context, cart);
+      // } catch (_) {}
+
+      // navigate to result screen
+      Navigator.of(context).pushReplacement(MaterialPageRoute(
+        builder: (_) => InvoiceResultScreen(
+          invoiceName: invoiceName ?? '',
+          cartSnapshot: List.from(cart.items),
+          customerName: _selectedCustomer,
+        ),
+      ));
+    } else {
+      final err = result['message']?.toString() ?? 'Failed to create invoice';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err)));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final cart = Provider.of<CartModel>(context);
@@ -465,13 +345,12 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       body: SafeArea(
         child: Row(
           children: [
-            // Left: Cart / items (makes it look like screenshot when on checkout)
+            // Left: Cart / items
             Expanded(
               flex: 2,
               child: Padding(
                 padding: const EdgeInsets.all(12.0),
                 child: Column(children: [
-                  // Customer header & search for quick add (reusing some UI)
                   Row(children: [
                     Expanded(child: Text('Items', style: Theme.of(context).textTheme.titleLarge)),
                     const SizedBox(width: 12),
@@ -525,23 +404,76 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                     padding: const EdgeInsets.all(12.0),
                     child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
                       Text('Payment Method', style: Theme.of(context).textTheme.titleMedium),
-                      const SizedBox(height: 8),
-                      // Simple cash input + quick presets
-                      Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.grey.shade300)),
-                        child: Column(children: [
-                          TextField(decoration: const InputDecoration(border: InputBorder.none, hintText: 'Paid amount'), keyboardType: const TextInputType.numberWithOptions(decimal: true)),
-                          const SizedBox(height: 8),
-                          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                            ElevatedButton(onPressed: () {}, child: const Text('₹ 100')),
-                            ElevatedButton(onPressed: () {}, child: const Text('₹ 200')),
-                            ElevatedButton(onPressed: () {}, child: const Text('₹ 500')),
-                          ])
-                        ]),
-                      ),
+
                       const SizedBox(height: 12),
-                      Expanded(child: Container()), // spacer to resemble layout
+
+                      // Mode of Payment dropdown (required)
+                      InputDecorator(
+                        decoration: const InputDecoration(labelText: 'Mode of Payment', border: OutlineInputBorder()),
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<String>(
+                            isExpanded: true,
+                            value: _selectedPaymentMode,
+                            items: _paymentModes.map((m) {
+                              final label = (m['mode_of_payment'] ?? m['name'])?.toString() ?? '';
+                              return DropdownMenuItem<String>(value: m['name']?.toString(), child: Text(label));
+                            }).toList(),
+                            onChanged: (v) => setState(() => _selectedPaymentMode = v),
+                          ),
+                        ),
+                      ),
+
+                      const SizedBox(height: 12),
+
+                      // Currency selector (default INR)
+                      InputDecorator(
+                        decoration: const InputDecoration(labelText: 'Currency', border: OutlineInputBorder()),
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<String>(
+                            isExpanded: true,
+                            value: _selectedCurrency,
+                            items: _currencies.map((c) {
+                              final label = (c['name'] ?? c.toString())?.toString();
+                              return DropdownMenuItem<String>(value: c['name']?.toString(), child: Text(label ?? ''));
+                            }).toList(),
+                            onChanged: (v) => setState(() => _selectedCurrency = v),
+                          ),
+                        ),
+                      ),
+
+                      const SizedBox(height: 12),
+
+                      // Posting date
+                      InputDecorator(
+                        decoration: const InputDecoration(labelText: 'Posting Date', border: OutlineInputBorder()),
+                        child: Row(
+                          children: [
+                            Expanded(child: Text(DateFormat('yyyy-MM-dd').format(_postingDate))),
+                            TextButton(onPressed: () async {
+                              final d = await showDatePicker(context: context, initialDate: _postingDate, firstDate: DateTime(2000), lastDate: DateTime(2100));
+                              if (d != null) setState(() => _postingDate = d);
+                            }, child: const Text('Select')),
+                          ],
+                        ),
+                      ),
+
+                      const SizedBox(height: 8),
+
+                      // optional quick customer change
+                      GestureDetector(
+                        onTap: () async {
+                          final sel = await _openSearchablePicker(ctx: context, title: 'Select Customer', items: _customers, valueKey: 'name', subLabelKey: 'customer_name');
+                          if (sel != null) setState(() => _selectedCustomer = sel);
+                        },
+                        child: InputDecorator(
+                          decoration: const InputDecoration(labelText: 'Customer', border: OutlineInputBorder()),
+                          child: Row(children: [Expanded(child: Text(_selectedCustomer ?? 'Select Customer')), const Icon(Icons.arrow_drop_down)]),
+                        ),
+                      ),
+
+                      const SizedBox(height: 12),
+                      Expanded(child: Container()), // spacer
+
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                         decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(8)),
@@ -559,7 +491,20 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                         ]),
                       ),
                       const SizedBox(height: 12),
-                      ElevatedButton(onPressed: cart.items.isEmpty || _loadingLookups ? null : () => _showCreateDialog(context, Provider.of<CartModel>(context, listen: false)), child: Padding(padding: const EdgeInsets.symmetric(vertical: 14.0), child: const Text('Complete Order'))),
+
+                      ElevatedButton(
+                        onPressed: cart.items.isEmpty || _loadingLookups || _creatingInvoice
+                            ? null
+                            : () async {
+                          await _completeOrder(cart);
+                        },
+                        child: _creatingInvoice
+                            ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                            : Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 14.0),
+                          child: const Text('Complete Order'),
+                        ),
+                      ),
                     ]),
                   ),
                 ),
@@ -571,6 +516,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     );
   }
 }
+
 
 
 
