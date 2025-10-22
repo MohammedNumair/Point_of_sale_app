@@ -6,76 +6,90 @@ class ItemCard extends StatelessWidget {
   final String uom;
   final String imageUrl;
   final String priceLabel;
-  final VoidCallback onAdd;
 
   const ItemCard({
     super.key,
     required this.itemName,
     required this.uom,
     required this.imageUrl,
-    required this.onAdd,
     required this.priceLabel,
   });
 
   @override
   Widget build(BuildContext context) {
-    // Reduced image height and tighter paddings so cards are smaller
-    final lead = (imageUrl.isNotEmpty)
+    // Compact sizing so cards fit well in a 5-column grid.
+    const double imageHeight = 240;
+    const double cardHeight = 150;
+
+    final Widget imageWidget = (imageUrl.isNotEmpty)
         ? ClipRRect(
       borderRadius: BorderRadius.circular(8),
       child: Image.network(
         imageUrl,
         width: double.infinity,
-        height: 280, // smaller height
+        height: imageHeight,
         fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) {
-          return Container(
-            width: double.infinity,
-            height: 280,
-            color: Colors.grey.shade200,
-            child: const Icon(Icons.image, size: 36, color: Colors.grey),
-          );
-        },
+        errorBuilder: (_, __, ___) => Container(
+          width: double.infinity,
+          height: imageHeight,
+          color: Colors.grey.shade200,
+          child: const Icon(Icons.image, size: 28, color: Colors.grey),
+        ),
       ),
     )
         : Container(
       width: double.infinity,
-      height: 280,
-      decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(8)),
-      child: const Icon(Icons.inventory, size: 36, color: Colors.grey),
+      height: imageHeight,
+      decoration: BoxDecoration(
+        color: Colors.grey.shade200,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: const Icon(Icons.inventory, size: 28, color: Colors.grey),
     );
 
     return Card(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       elevation: 0.6,
       child: SizedBox(
-        height: 230, // fixed-ish card height to keep layout consistent
+        height: cardHeight,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            lead,
+            // image
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 6),
-              child: Text(itemName, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600)),
+              padding: const EdgeInsets.all(8.0),
+              child: imageWidget,
+            ),
+
+            // name + uom
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4),
+              child: Text(
+                itemName,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+              ),
             ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8.0),
-              child: Text(uom, style: const TextStyle(color: Colors.grey, fontSize: 12)),
+              child: Text(
+                uom,
+                style: TextStyle(color: Colors.grey.shade600, fontSize: 11),
+              ),
             ),
+
             const Spacer(),
+
+            // price (no Add button)
             Padding(
               padding: const EdgeInsets.all(8.0),
-              child: Row(
-                children: [
-                  Expanded(child: Text(priceLabel, style: const TextStyle(fontWeight: FontWeight.bold))),
-                  ElevatedButton(
-                    onPressed: onAdd,
-                    style: ElevatedButton.styleFrom(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
-                    child: const Text('Add'),
-                  )
-                ],
+              child: Text(
+                priceLabel,
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                overflow: TextOverflow.ellipsis,
               ),
-            )
+            ),
           ],
         ),
       ),
