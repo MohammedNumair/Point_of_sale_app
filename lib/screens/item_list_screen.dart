@@ -15,7 +15,7 @@ import '../widgets/item_card.dart';
 import '../logic/barcode_handlers.dart';
 import '../widgets/barcode_keyboard_listener.dart';
 import '../constants/config.dart';
-import '../utils/formatters.dart'; // Formatters.money
+import '../utils/formatters.dart'; // Formatters.money (keep if used elsewhere)
 
 class ItemListScreen extends StatefulWidget {
   const ItemListScreen({super.key});
@@ -53,6 +53,9 @@ class _ItemListScreenState extends State<ItemListScreen> {
 
   String _searchQuery = '';
 
+  // Guard to prevent overlapping opening checks/dialogs
+  bool _openingCheckInProgress = false;
+
   @override
   void initState() {
     super.initState();
@@ -66,10 +69,26 @@ class _ItemListScreenState extends State<ItemListScreen> {
       });
     });
 
-    // On first frame: ensure opening entry exists (submitted on server) BEFORE loading items.
+    // On first frame: ensure opening entry exists (status == "Open") BEFORE loading items.
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      await _ensureOpeningEntryExists(); // mandatory: will force user to create+submit if none found
+      await _ensureOpeningEntryExists();
       await fetchItems();
+    });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+
+    // Re-check when this route becomes current. Using a post-frame callback ensures ModalRoute is available.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ModalRoute<dynamic>? route = ModalRoute.of(context);
+      if (route != null && route.isCurrent) {
+        if (!_openingCheckInProgress) {
+          // fire-and-forget; internal guard prevents reentry
+          _ensureOpeningEntryExists();
+        }
+      }
     });
   }
 
@@ -96,25 +115,29 @@ class _ItemListScreenState extends State<ItemListScreen> {
     }
   }
 
-  /// Ensure that there is a submitted (docstatus==1) POS Opening Entry for today.
+  /// Ensure that there is an Open POS Opening Entry for today.
   /// If not found, show a mandatory dialog and require the user to create & submit one.
   Future<void> _ensureOpeningEntryExists() async {
+    if (_openingCheckInProgress || !mounted) return;
+    _openingCheckInProgress = true;
+
     final apiProv = Provider.of<ApiProvider>(context, listen: false);
 
-    // Helper to ask server whether an Opening Entry exists for today with docstatus == 1
-    Future<bool> serverHasSubmittedOpening() async {
+    // Helper to ask server whether an Opening Entry exists for today with status == "Open"
+    Future<bool> serverHasOpenOpening() async {
       try {
         final company = AppConfig.companyName ?? '';
         final today = DateTime.now();
         final todayStr =
             '${today.year.toString().padLeft(4, '0')}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
 
+        // Query for POS Opening Entry with matching company, period_start_date and status == "Open"
         final resp = await apiProv.dio.get('/api/resource/POS Opening Entry', queryParameters: {
-          'fields': '["name","period_start_date","docstatus"]',
+          'fields': '["name","period_start_date","status","docstatus"]',
           'filters': jsonEncode([
             ['company', '=', company],
             ['period_start_date', '=', todayStr],
-            ['docstatus', '=', 1] // only count submitted (docstatus==1)
+            ['status', '=', 'Open']
           ]),
           'limit_page_length': '1'
         }, options: Options(validateStatus: (_) => true));
@@ -123,28 +146,29 @@ class _ItemListScreenState extends State<ItemListScreen> {
           return true;
         }
       } catch (e) {
-        debugPrint('serverHasSubmittedOpening check failed: $e');
+        debugPrint('serverHasOpenOpening check failed: $e');
       }
       return false;
     }
 
-    // First quick server check
-    bool exists = await serverHasSubmittedOpening();
+    try {
+      bool exists = await serverHasOpenOpening();
 
-    // If not exists, show mandatory dialog and loop until it is created+submitted.
-    while (!exists && mounted) {
-      // show mandatory dialog which will remain until successful submit
-      await _showOpeningEntryDialog(mandatory: true);
+      while (!exists && mounted) {
+        // show mandatory dialog which will remain until successful submit/open
+        await _showOpeningEntryDialog(mandatory: true);
 
-      // after dialog returns, re-check server for submitted entry
-      exists = await serverHasSubmittedOpening();
+        // after dialog returns, re-check server for Open entry
+        exists = await serverHasOpenOpening();
 
-      // if still false, show SnackBar to inform user and loop to reopen dialog
-      if (!exists && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('POS Opening Entry not found on server. Please create and submit it.')));
-        // small delay to avoid fast loop
-        await Future.delayed(const Duration(milliseconds: 200));
+        if (!exists && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('POS Opening Entry with status "Open" not found on server. Please create and submit/open it.')));
+          // small delay to avoid very fast loop
+          await Future.delayed(const Duration(milliseconds: 300));
+        }
       }
+    } finally {
+      _openingCheckInProgress = false;
     }
   }
 
@@ -314,8 +338,8 @@ class _ItemListScreenState extends State<ItemListScreen> {
 
     await showDialog(
       context: context,
-      builder: (ctx) {
-        return StatefulBuilder(builder: (dctx, setD) {
+      builder: (dctx) {
+        return StatefulBuilder(builder: (dctxInner, setD) {
           final trimmedPosList = _posProfiles.map((m) => (m['name']?.toString() ?? '').trim()).toList();
           final trimmedPriceList = _priceLists.map((m) => (m['name']?.toString() ?? '').trim()).toList();
 
@@ -367,49 +391,50 @@ class _ItemListScreenState extends State<ItemListScreen> {
             actions: [
               TextButton(onPressed: () => Navigator.of(dctx).pop(), child: const Text('Cancel')),
               TextButton(
-                  onPressed: () async {
-                    try {
-                      final prefs = await SharedPreferences.getInstance();
-                      if (selPos != null && selPos!.isNotEmpty) {
-                        final trimmedPos = selPos!.trim();
-                        await prefs.setString('selected_pos_profile', trimmedPos);
-                        _selectedPosProfile = trimmedPos;
+                onPressed: () async {
+                  try {
+                    final prefs = await SharedPreferences.getInstance();
+                    if (selPos != null && selPos!.isNotEmpty) {
+                      final trimmedPos = selPos!.trim();
+                      await prefs.setString('selected_pos_profile', trimmedPos);
+                      _selectedPosProfile = trimmedPos;
 
-                        // try to fetch POS Profile doc to read company field
-                        try {
-                          final resp = await apiProv.dio.get('/api/resource/POS Profile/$trimmedPos', queryParameters: {'fields': '["name","company"]'}, options: Options(validateStatus: (_) => true));
-                          if (resp.statusCode == 200 && resp.data != null) {
-                            final d = resp.data;
-                            String? company;
-                            if (d is Map && d['data'] is Map && d['data']['company'] != null) {
-                              company = d['data']['company']?.toString();
-                            } else if (d is Map && d['company'] != null) {
-                              company = d['company']?.toString();
-                            }
-                            if (company != null && company.isNotEmpty) {
-                              AppConfig.companyName = company;
-                              await prefs.setString('company_name', company);
-                            }
+                      // try to fetch POS Profile doc to read company field
+                      try {
+                        final resp = await apiProv.dio.get('/api/resource/POS Profile/$trimmedPos', queryParameters: {'fields': '["name","company"]'}, options: Options(validateStatus: (_) => true));
+                        if (resp.statusCode == 200 && resp.data != null) {
+                          final d = resp.data;
+                          String? company;
+                          if (d is Map && d['data'] is Map && d['data']['company'] != null) {
+                            company = d['data']['company']?.toString();
+                          } else if (d is Map && d['company'] != null) {
+                            company = d['company']?.toString();
                           }
-                        } catch (e) {
-                          debugPrint('settings: error fetching POS Profile doc: $e');
+                          if (company != null && company.isNotEmpty) {
+                            AppConfig.companyName = company;
+                            await prefs.setString('company_name', company);
+                          }
                         }
+                      } catch (e) {
+                        debugPrint('settings: error fetching POS Profile doc: $e');
                       }
-
-                      if (selPrice != null && selPrice!.isNotEmpty) {
-                        final trimmedPrice = selPrice!.trim();
-                        await prefs.setString('selected_price_list', trimmedPrice);
-                        _selectedPriceList = trimmedPrice;
-                      }
-
-                      setState(() {});
-                    } catch (e) {
-                      debugPrint('settings: save failed: $e');
-                    } finally {
-                      Navigator.of(dctx).pop();
                     }
-                  },
-                  child: const Text('Save')),
+
+                    if (selPrice != null && selPrice!.isNotEmpty) {
+                      final trimmedPrice = selPrice!.trim();
+                      await prefs.setString('selected_price_list', trimmedPrice);
+                      _selectedPriceList = trimmedPrice;
+                    }
+
+                    setState(() {});
+                  } catch (e) {
+                    debugPrint('settings: save failed: $e');
+                  } finally {
+                    Navigator.of(dctx).pop();
+                  }
+                },
+                child: const Text('Save'),
+              ),
             ],
           );
         });
@@ -560,7 +585,6 @@ class _ItemListScreenState extends State<ItemListScreen> {
                 ),
               ),
               actions: [
-                // No Cancel action when mandatory. If not mandatory, allow Cancel.
                 if (!mandatory) TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Cancel')),
                 ElevatedButton(
                   onPressed: () async {
@@ -568,7 +592,7 @@ class _ItemListScreenState extends State<ItemListScreen> {
                       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Select POS Profile')));
                       return;
                     }
-                    if (loggedUser == null || loggedUser!.isEmpty) {
+                    if (loggedUser == null || loggedUser.isEmpty) {
                       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Logged user not found.')));
                       return;
                     }
@@ -774,7 +798,7 @@ class _ItemListScreenState extends State<ItemListScreen> {
                     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Select POS Profile')));
                     return;
                   }
-                  if (loggedUser == null || loggedUser!.isEmpty) {
+                  if (loggedUser == null || loggedUser.isEmpty) {
                     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Logged user not found.')));
                     return;
                   }
@@ -846,11 +870,9 @@ class _ItemListScreenState extends State<ItemListScreen> {
   }
 
   /// Best-effort call to server custom method to create sales invoices from the created POS Closing Entry.
-  /// Replace the method name/path below if your backend uses a different endpoint.
   Future<void> _postClosingAndCreateInvoices(String posClosingName) async {
     final apiProv = Provider.of<ApiProvider>(context, listen: false);
     try {
-      // IMPORTANT: change this method path to match your custom backend method if different.
       final resp = await apiProv.dio.post('/api/method/pos_custom.api.create_sales_invoice_from_pos_closing',
           data: {'pos_closing_entry': posClosingName}, options: Options(validateStatus: (_) => true));
 
@@ -1272,6 +1294,7 @@ class _ItemListScreenState extends State<ItemListScreen> {
     return _selectedCustomer!;
   }
 }
+
 
 
 
