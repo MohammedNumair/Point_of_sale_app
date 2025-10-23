@@ -457,7 +457,7 @@ class _ItemListScreenState extends State<ItemListScreen> {
   }
 
   // ----------------- POS Opening Entry creation & submit -----------------
-  /// If `mandatory` is true dialog is non-dismissable and the user must successfully submit an opening entry.
+  /// If mandatory is true dialog is non-dismissable and the user must successfully submit an opening entry.
   Future<void> _showOpeningEntryDialog({bool mandatory = false}) async {
     setState(() => _settingsLoading = true);
     final apiProv = Provider.of<ApiProvider>(context, listen: false);
@@ -798,7 +798,7 @@ class _ItemListScreenState extends State<ItemListScreen> {
                     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Select POS Profile')));
                     return;
                   }
-                  if (loggedUser == null || loggedUser.isEmpty) {
+                  if (loggedUser == null || loggedUser!.isEmpty) {
                     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Logged user not found.')));
                     return;
                   }
@@ -973,14 +973,8 @@ class _ItemListScreenState extends State<ItemListScreen> {
   Widget build(BuildContext context) {
     final cart = Provider.of<CartModel>(context);
 
-    // responsive columns
-    final width = MediaQuery.of(context).size.width;
-    int columns = 3;
-    if (width < 900) {
-      columns = 2;
-    } else if (width >= 1400) {
-      columns = 4;
-    }
+    // NOTE: per request make grid 5 columns
+    const int columns = 5;
 
     return BarcodeKeyboardListener(
       onBarcode: (code) async => await _onBarcodeScanned(code),
@@ -1089,7 +1083,7 @@ class _ItemListScreenState extends State<ItemListScreen> {
                     Expanded(
                       child: GridView.builder(
                         itemCount: _filteredItems.length,
-                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                           crossAxisCount: columns,
                           childAspectRatio: 0.75,
                           crossAxisSpacing: 12,
@@ -1105,16 +1099,20 @@ class _ItemListScreenState extends State<ItemListScreen> {
                           final uomText = uom.isEmpty ? '' : uom;
                           final priceLabel = displayRate > 0 ? '₹ ${displayRate.toStringAsFixed(0)} / ${uomText.isNotEmpty ? uomText : ''}'.trim() : '';
 
-                          return ItemCard(
-                            itemName: it.itemName ?? it.name,
-                            uom: uomText,
-                            imageUrl: imageUrlFor(it.image),
-                            priceLabel: priceLabel,
-                            // pass displayRate so add uses same price
-                            onAdd: () {
+                          // Wrap the card with InkWell so tapping the whole card adds the item
+                          return InkWell(
+                            onTap: () {
                               Provider.of<CartModel>(context, listen: false).add(it, rate: displayRate);
                               ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${it.itemName ?? it.name} added — ${displayRate.toStringAsFixed(2)}')));
                             },
+                            child: ItemCard(
+                              itemName: it.itemName ?? it.name,
+                              uom: uomText,
+                              imageUrl: imageUrlFor(it.image),
+                              priceLabel: priceLabel,
+                              // NOTE: intentionally not passing an "onAdd" callback so the card's add button isn't shown (if ItemCard
+                              // is implemented to show button only when onAdd is provided). Tapping the card adds the item instead.
+                            ),
                           );
                         },
                       ),
@@ -1294,8 +1292,6 @@ class _ItemListScreenState extends State<ItemListScreen> {
     return _selectedCustomer!;
   }
 }
-
-
 
 
 
