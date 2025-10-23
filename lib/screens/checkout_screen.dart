@@ -30,13 +30,13 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   List<Map<String, dynamic>> _customers = [];
   List<Map<String, dynamic>> _posProfiles = [];
   List<Map<String, dynamic>> _priceLists = [];
-  List<Map<String, dynamic>> _currencies = [];
+  // removed currencies list UI - we fetch default currency from Company
   List<Map<String, dynamic>> _paymentModes = [];
 
   String? _selectedCustomer;
   String? _selectedPosProfile;
   String? _selectedPriceList;
-  String? _selectedCurrency;
+  String? _selectedCurrency; // kept, but will be set from Company.default_currency
   String? _selectedPaymentMode;
   DateTime _postingDate = DateTime.now();
 
@@ -63,7 +63,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       final customers = await apiProv.getCustomerList();
       final posProfiles = await apiProv.getPOSProfileList();
       final priceLists = await apiProv.getSellingPriceList();
-      final currencies = await apiProv.getCurrencyList();
+      // removed getCurrencyList usage - default currency will be read from Company
 
       final resp = await dio.get('/api/resource/Mode of Payment',
           queryParameters: {'fields': '["name","mode_of_payment"]', 'limit_page_length': '200'},
@@ -79,26 +79,29 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       final savedPos = prefs.getString('selected_pos_profile')?.trim();
       final savedPrice = prefs.getString('selected_price_list')?.trim();
       final savedCompany = prefs.getString('company_name')?.trim();
-      final savedCustomer = prefs.getString('selected_customer')?.trim(); // optional (ItemListScreen didn't persist by default)
+      final savedCustomer = prefs.getString('selected_customer')?.trim(); // optional
 
-      // determine default currency - prefer INR if available
+      // determine default currency by reading Company.default_currency
       String? defaultCurrency;
-      if (currencies.isNotEmpty) {
-        final foundInr = currencies.firstWhere((c) => (c['name'] ?? '').toString().toUpperCase() == 'INR', orElse: () => {});
-        if (foundInr.isNotEmpty) defaultCurrency = foundInr['name']?.toString();
+      String companyName = AppConfig.companyName ?? savedCompany ?? '';
+      if (companyName.isNotEmpty) {
+        final compResp = await dio.get('/api/resource/Company/$companyName',
+            queryParameters: {'fields': '["default_currency"]'}, options: Options(validateStatus: (_) => true));
+        if (compResp.statusCode == 200 && compResp.data is Map && compResp.data['data'] is Map) {
+          final Map<String, dynamic> comp = Map<String, dynamic>.from(compResp.data['data']);
+          defaultCurrency = comp['default_currency']?.toString();
+        }
       }
 
       setState(() {
         _customers = customers;
         _posProfiles = posProfiles;
         _priceLists = priceLists;
-        _currencies = currencies;
         _paymentModes = paymentModes;
 
         // prefer saved values, else pick first available
         _selectedPosProfile = savedPos?.isNotEmpty == true ? savedPos : (_posProfiles.isNotEmpty ? _posProfiles.first['name']?.toString() : null);
         _selectedPriceList = savedPrice?.isNotEmpty == true ? savedPrice : (_priceLists.isNotEmpty ? _priceLists.first['name']?.toString() : null);
-        _selectedCurrency = defaultCurrency ?? (_currencies.isNotEmpty ? _currencies.first['name']?.toString() : null);
         _selectedPaymentMode = _paymentModes.isNotEmpty ? _paymentModes.first['name']?.toString() : null;
 
         // prefer saved customer if present, else default to first from server
@@ -106,6 +109,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
         // prefer saved company
         if (savedCompany != null && savedCompany.isNotEmpty) AppConfig.companyName = savedCompany;
+
+        // set fetched default currency if present (kept for use when creating invoice)
+        _selectedCurrency = defaultCurrency;
       });
     } on DioError catch (dioErr) {
       String msg = 'Error loading dropdowns: ${dioErr.message}';
@@ -137,10 +143,13 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     }
 
     // ensure required fields are set (we default using lookups + SharedPreferences)
-    if (_selectedCustomer == null || _selectedPosProfile == null || _selectedPriceList == null || _selectedCurrency == null || _selectedPaymentMode == null) {
+    if (_selectedCustomer == null || _selectedPosProfile == null || _selectedPriceList == null || _selectedPaymentMode == null) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Missing required fields.')));
       return {'ok': false, 'message': 'Missing required fields'};
     }
+
+    // ensure we have a currency (from company); fallback to null if not set
+    final currencyToSend = _selectedCurrency ?? '';
 
     final apiProv = Provider.of<ApiProvider>(context, listen: false);
     final dio = apiProv.dio;
@@ -159,7 +168,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       'company': companyName,
       'pos_profile': _selectedPosProfile,
       'posting_date': DateFormat('yyyy-MM-dd').format(_postingDate),
-      'currency': _selectedCurrency,
+      // include currency field if available (ERPNext will use company default if left empty)
+      if (currencyToSend.isNotEmpty) 'currency': currencyToSend,
       'selling_price_list': _selectedPriceList,
       'items': itemsPayload,
       'sales_invoice_payment': [salesInvoicePaymentRow],
@@ -305,9 +315,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     if (savedCustomer != null && savedCustomer.isNotEmpty) _selectedCustomer = savedCustomer;
 
     // Basic validation
-    if (_selectedCustomer == null || _selectedPosProfile == null || _selectedPriceList == null || _selectedCurrency == null || _selectedPaymentMode == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Missing required fields. Please check Mode of Payment, Currency and that POS/PriceList/Customer are configured.')));
-      return;
+    if (_selectedCustomer == null || _selectedPosProfile == null || _selectedPriceList == null || _selectedPaymentMode == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Missing required fields. Please check Mode of Payment and that POS/PriceList/Customer are configured.')));      return;
     }
 
     final result = await _createInvoiceOnServer(context, cart);
@@ -317,10 +326,14 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       final msg = result['message']?.toString() ?? 'Invoice created';
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
 
-      // optionally print
-      // try {
-      //   await _printInvoice(context, cart);
-      // } catch (_) {}
+      // Immediately print the receipt. This uses pdf + printing package.
+      try {
+        await _printInvoice(cart: cart, invoiceName: invoiceName ?? '', customerName: _selectedCustomer ?? '');
+      } catch (e, st) {
+        debugPrint('>>> printInvoice failed: $e\n$st');
+        // show a non-blocking warning
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Printing failed — see logs.')));
+      }
 
       // navigate to result screen
       Navigator.of(context).pushReplacement(MaterialPageRoute(
@@ -334,6 +347,71 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       final err = result['message']?.toString() ?? 'Failed to create invoice';
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err)));
     }
+  }
+
+  /// Generate a simple receipt PDF and send to the printing package.
+  /// If you prefer direct ESC/POS Bluetooth printing, I can replace this with
+  /// code that uses your HomeflowPrinter / DantSu ESC/POS library.
+  Future<void> _printInvoice({
+    required CartModel cart,
+    required String invoiceName,
+    required String customerName,
+  }) async {
+    final pdf = pw.Document();
+
+    pdf.addPage(
+      pw.Page(
+        pageFormat: PdfPageFormat.roll57.copyWith(marginBottom: 8, marginLeft: 8, marginRight: 8, marginTop: 8),
+        build: (pw.Context ctx) {
+          return pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+            pw.Text(AppConfig.companyName ?? '', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
+            pw.SizedBox(height: 4),
+            pw.Text('POS Receipt', style: pw.TextStyle(fontSize: 12)),
+            pw.Divider(),
+            pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
+              pw.Text('Invoice:', style: pw.TextStyle(fontSize: 10)),
+              pw.Text(invoiceName, style: pw.TextStyle(fontSize: 10)),
+            ]),
+            pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
+              pw.Text('Customer:', style: pw.TextStyle(fontSize: 10)),
+              pw.Text(customerName, style: pw.TextStyle(fontSize: 10)),
+            ]),
+            pw.SizedBox(height: 6),
+            pw.Table.fromTextArray(
+              headers: ['Item', 'Qty', 'Rate', 'Amount'],
+              data: cart.items.map((c) {
+                final qty = formatQty(c.qty);
+                final rate = Formatters.money(c.rate);
+                final amt = Formatters.money(c.rate * c.qty);
+                final name = c.item.itemName ?? c.item.name;
+                return [name, qty, rate, amt];
+              }).toList(),
+              headerStyle: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold),
+              cellStyle: pw.TextStyle(fontSize: 9),
+              cellAlignment: pw.Alignment.centerRight,
+              headerDecoration: pw.BoxDecoration(),
+              columnWidths: {
+                0: pw.FlexColumnWidth(4),
+                1: pw.FlexColumnWidth(1),
+                2: pw.FlexColumnWidth(2),
+                3: pw.FlexColumnWidth(2),
+              },
+            ),
+            pw.Divider(),
+            pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
+              pw.Text('Subtotal', style: pw.TextStyle(fontSize: 10)),
+              pw.Text(Formatters.money(cart.total), style: pw.TextStyle(fontSize: 10)),
+            ]),
+            pw.SizedBox(height: 8),
+            pw.Align(alignment: pw.Alignment.center, child: pw.Text('Thank you!', style: pw.TextStyle(fontSize: 10))),
+          ]);
+        },
+      ),
+    );
+
+    // Send to printing. This will open the native print dialog for the user to choose/confirm the printer.
+    // If you want silent printing to a Bluetooth ESC/POS printer, tell me and I will implement direct ESC/POS byte printing.
+    await Printing.layoutPdf(onLayout: (PdfPageFormat format) async => pdf.save());
   }
 
   @override
@@ -425,21 +503,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
                       const SizedBox(height: 12),
 
-                      // Currency selector (default INR)
-                      InputDecorator(
-                        decoration: const InputDecoration(labelText: 'Currency', border: OutlineInputBorder()),
-                        child: DropdownButtonHideUnderline(
-                          child: DropdownButton<String>(
-                            isExpanded: true,
-                            value: _selectedCurrency,
-                            items: _currencies.map((c) {
-                              final label = (c['name'] ?? c.toString())?.toString();
-                              return DropdownMenuItem<String>(value: c['name']?.toString(), child: Text(label ?? ''));
-                            }).toList(),
-                            onChanged: (v) => setState(() => _selectedCurrency = v),
-                          ),
-                        ),
-                      ),
+                      // NOTE: Currency dropdown removed from UI. Currency is fetched from Company.default_currency and used internally.
 
                       const SizedBox(height: 12),
 
@@ -516,6 +580,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     );
   }
 }
+
+
 
 
 
